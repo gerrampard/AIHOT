@@ -4,7 +4,7 @@
 // waiting behind an unreleased item leaves new snapshots at once, and snapshots answer conditional requests.
 import { config } from "@aihot/backend/config";
 import { CATEGORY_LABELS } from "@aihot/contracts/taxonomy";
-import { beijingDate } from "@aihot/contracts/time";
+import { beijingDate, isoWeekLabel } from "@aihot/contracts/time";
 import { ogEtag } from "../apps/api/src/og/render.ts";
 import { posterEtag } from "../apps/api/src/og/poster.ts";
 import { tag } from "./setup.ts";
@@ -18,7 +18,7 @@ import { upsertMaterial } from "@aihot/backend/content/materials";
 import { stopBoss } from "@aihot/backend/jobs/queue";
 import { publishArticle, republishSource } from "@aihot/backend/publication/publish";
 import { computeHotRanking } from "@aihot/backend/events/hot";
-import { latestHotRanking } from "@aihot/backend/events/hot-read";
+import { latestHotRanking } from "@aihot/backend/publication/hot";
 import { effectiveWatermark } from "@aihot/backend/publication/v1";
 import { buildApp } from "../apps/api/src/app.ts";
 
@@ -26,6 +26,8 @@ const T = tag();
 const SOURCE = `test-publication-${T}`;
 const BODY = `FULLTEXT-${T} `.repeat(40);
 const REPORT_KEY = `2099-12-${String(10 + Math.floor(Math.random() * 19))}`;
+const WEEKLY_KEY = isoWeekLabel(REPORT_KEY);
+const MONTHLY_KEY = REPORT_KEY.slice(0, 7);
 const app = await buildApp();
 
 before(async () => {
@@ -35,7 +37,7 @@ before(async () => {
             VALUES (${SOURCE}, 'Test publication', 'rss', 'T1', 'editorial', true, true, '2100-01-01')`;
 });
 after(async () => {
-  await sql`DELETE FROM reports WHERE kind = 'daily' AND key = ${REPORT_KEY}`;
+  await sql`DELETE FROM reports WHERE (kind = 'daily' AND key = ${REPORT_KEY}) OR (kind = 'weekly' AND key = ${WEEKLY_KEY}) OR (kind = 'monthly' AND key = ${MONTHLY_KEY})`;
   await app.close();
   await stopBoss();
   await closeDb();
@@ -143,6 +145,98 @@ test("a withdrawn item leaves every report exit", async () => {
   }
 });
 
+test("weekly v1 exposes published issues with stable lookup, caching and withdrawal filtering", async () => {
+  const id = await article();
+  await publishArticle(id, released());
+  const content = {
+    overview: `OVERVIEW-${T}`,
+    themes: [{
+      heading: "模型",
+      summary: `THEME-${T}`,
+      storyRefs: [{
+        itemId: id,
+        title: `WEEKLY-LEAD-${T}`,
+        summary: `WEEKLY-QUOTED-${T}`,
+        sourceUrl: `https://example.com/weekly-original-${T}`,
+        sourceName: "Test",
+        publishedAt: new Date().toISOString(),
+      }],
+    }],
+    storyOrder: [id],
+  };
+  await sql`INSERT INTO reports (kind, key, window_start, window_end, content, generated_at, origin)
+            VALUES ('weekly', ${WEEKLY_KEY}, now() - interval '7 days', now(), ${sql.json(content as never)}, now(), 'manual')
+            ON CONFLICT (kind, key) DO UPDATE SET content = EXCLUDED.content, generated_at = EXCLUDED.generated_at`;
+
+  const list = await get("/api/v1/weeklies?limit=1");
+  assert.equal(list.status, 200);
+  assert.ok(list.body.includes(WEEKLY_KEY) && list.body.includes(`WEEKLY-LEAD-${T}`));
+
+  const detail = await get(`/api/v1/weeklies/${WEEKLY_KEY}`);
+  assert.equal(detail.status, 200);
+  assert.ok(detail.body.includes(`WEEKLY-QUOTED-${T}`) && detail.body.includes(`weekly-original-${T}`));
+  assert.ok(detail.etag);
+  assert.equal((await get(`/api/v1/weeklies/${WEEKLY_KEY}`, { "if-none-match": detail.etag! })).status, 304);
+
+  const latest = await get("/api/v1/weeklies/latest");
+  assert.equal(latest.status, 200);
+  assert.ok(latest.body.includes(WEEKLY_KEY));
+
+  assert.equal((await get("/api/v1/weeklies/2099-W00")).status, 400);
+  assert.equal((await get("/api/v1/weeklies/2098-W01")).status, 404);
+
+  await setVisibility(id, { visibility: "withdrawn", reason: "test", version: 0 }, "test");
+  const withdrawn = await get(`/api/v1/weeklies/${WEEKLY_KEY}`);
+  assert.equal(withdrawn.status, 200);
+  assert.ok(!withdrawn.body.includes(`WEEKLY-QUOTED-${T}`) && !withdrawn.body.includes(`WEEKLY-LEAD-${T}`) && !withdrawn.body.includes(`weekly-original-${T}`));
+});
+
+test("monthly v1 exposes published issues with stable lookup, caching and withdrawal filtering", async () => {
+  const id = await article();
+  await publishArticle(id, released());
+  const content = {
+    overview: `OVERVIEW-${T}`,
+    themes: [{
+      heading: "模型",
+      summary: `THEME-${T}`,
+      storyRefs: [{
+        itemId: id,
+        title: `MONTHLY-LEAD-${T}`,
+        summary: `MONTHLY-QUOTED-${T}`,
+        sourceUrl: `https://example.com/monthly-original-${T}`,
+        sourceName: "Test",
+        publishedAt: new Date().toISOString(),
+      }],
+    }],
+    storyOrder: [id],
+  };
+  await sql`INSERT INTO reports (kind, key, window_start, window_end, content, generated_at, origin)
+            VALUES ('monthly', ${MONTHLY_KEY}, now() - interval '7 days', now(), ${sql.json(content as never)}, now(), 'manual')
+            ON CONFLICT (kind, key) DO UPDATE SET content = EXCLUDED.content, generated_at = EXCLUDED.generated_at`;
+
+  const list = await get("/api/v1/monthlies?limit=1");
+  assert.equal(list.status, 200);
+  assert.ok(list.body.includes(MONTHLY_KEY) && list.body.includes(`MONTHLY-LEAD-${T}`));
+
+  const detail = await get(`/api/v1/monthlies/${MONTHLY_KEY}`);
+  assert.equal(detail.status, 200);
+  assert.ok(detail.body.includes(`MONTHLY-QUOTED-${T}`) && detail.body.includes(`monthly-original-${T}`));
+  assert.ok(detail.etag);
+  assert.equal((await get(`/api/v1/monthlies/${MONTHLY_KEY}`, { "if-none-match": detail.etag! })).status, 304);
+
+  const latest = await get("/api/v1/monthlies/latest");
+  assert.equal(latest.status, 200);
+  assert.ok(latest.body.includes(MONTHLY_KEY));
+
+  assert.equal((await get("/api/v1/monthlies/2099-13")).status, 400);
+  assert.equal((await get("/api/v1/monthlies/2098-01")).status, 404);
+
+  await setVisibility(id, { visibility: "withdrawn", reason: "test", version: 0 }, "test");
+  const withdrawn = await get(`/api/v1/monthlies/${MONTHLY_KEY}`);
+  assert.equal(withdrawn.status, 200);
+  assert.ok(!withdrawn.body.includes(`MONTHLY-QUOTED-${T}`) && !withdrawn.body.includes(`MONTHLY-LEAD-${T}`) && !withdrawn.body.includes(`monthly-original-${T}`));
+});
+
 test("a withdrawal takes down only the stories citing it, including secondary memberships", async () => {
   const id = await article();
   await publishArticle(id, released());
@@ -167,10 +261,15 @@ test("a withdrawn item leaves the hot board and the hot APIs at once, not at the
   const [story] = await sql<{ id: number }[]>`
     INSERT INTO stories (public_id, title, first_report_at, latest_at) VALUES (${randomUUID()}, ${`HOT-${T}`}, now() - interval '2 hours', now()) RETURNING id`;
   const [fact] = await sql<{ id: number }[]>`INSERT INTO facts (public_id, story_id, title) VALUES (${`fact-${T}`}, ${story!.id}, ${`HOT-${T}`}) RETURNING id`;
-  for (const id of [await article(), await article()]) {
+  const secondSource = `${SOURCE}-hot-b`;
+  await sql`INSERT INTO sources (id, name, kind, tier, participation_mode, site_fulltext, syndicate_fulltext, next_fetch_at)
+            VALUES (${secondSource}, 'Test independent source', 'rss', 'T1', 'editorial', true, true, '2100-01-01')`;
+  for (const [index, id] of [await article(), await article()].entries()) {
+    const sourceId = index === 0 ? SOURCE : secondSource;
+    await sql`UPDATE articles SET source_id = ${sourceId} WHERE id = ${id}`;
     await sql`INSERT INTO fact_articles (fact_id, article_id, role) VALUES (${fact!.id}, ${id}, 'report')`;
     await sql`INSERT INTO story_signals (story_id, article_id, participant_key, source_id, kind, observed_at)
-              VALUES (${story!.id}, ${id}, ${`participant-${id}`}, ${SOURCE}, 'editorial', now() - interval '1 hour')`;
+              VALUES (${story!.id}, ${id}, ${`participant-${id}`}, ${sourceId}, 'editorial', now() - interval '1 hour')`;
     await publishArticle(id, released());
   }
   await computeHotRanking();
@@ -383,4 +482,45 @@ test("minimal sync projection preserves snapshot fields, pagination bindings and
   await setVisibility(id, { visibility: 'withdrawn', reason: 'sync test', version: 0 }, 'test');
   const removed = await getChanges(minimalChanges.cursor);
   assert.ok(removed.changes.some((c: any) => c.op === 'remove' && c.id === id));
+});
+
+// Failure cases: an offline client resumes before a withdrawal; a one-entry page must not send the
+// old content and wait for a later remove; both field projections and legacy clients must advance.
+test('historical sync never redistributes withdrawn content, even on a one-entry page', async () => {
+  for (const visibility of ['withdrawn', 'summary-only'] as const) {
+    for (const fields of ['minimal', 'default']) {
+      const start = JSON.parse((await get(`/api/v1/selected/snapshot?fields=${fields}`)).body).cursor;
+      const id = await article();
+      await publishArticle(id, released());
+      await setVisibility(id, { visibility, reason: 'test offline sync', version: 0 }, 'test');
+      for (const [prefix, limit] of [['v1', 'limit']]) {
+        const response = await get(`/api/${prefix}/selected/changes?${limit}=1&cursor=${encodeURIComponent(start)}`);
+        assert.equal(response.status, 200);
+        const page = JSON.parse(response.body);
+        assert.equal(page.changes[0].op, 'remove', `${prefix} ${fields} ${visibility}`);
+        assert.equal(page.changes[0].id, id);
+        assert.equal(page.changes[0].item, undefined);
+        assert.notEqual(page.cursor, start, 'redacting a historical upsert must still advance');
+        assert.equal(page.hasMore, true, 'the later removal is still resumable');
+      }
+    }
+  }
+});
+
+test('event neighbors disappear when their last readable evidence is withdrawn or still gated', async () => {
+  const id = await article();
+  const neighborId = await article();
+  await publishArticle(id, released());
+  await publishArticle(neighborId, released());
+  const current = await storyFor(id);
+  const neighbor = await storyFor(neighborId);
+  await sql`INSERT INTO story_links (story_id, other_id, relation)
+    SELECT s.id, n.id, 'related' FROM stories s, stories n WHERE s.public_id = ${current} AND n.public_id = ${neighbor}`;
+  const exits = [`/api/site/stories/${current}`, `/api/v1/stories/${current}`, `/api/v1/agent/stories/${current}`];
+  for (const url of exits) assert.ok((await get(url)).body.includes(neighbor), 'public neighbor is linked');
+  for (const gated of [true, false]) {
+    await sql`UPDATE publications SET visible_after = now() + interval '1 hour', visibility = ${gated ? 'public' : 'withdrawn'} WHERE article_id = ${neighborId}`;
+    assert.equal((await get(`/api/v1/stories/${neighbor}`)).status, 404);
+    for (const url of exits) assert.ok(!(await get(url)).body.includes(neighbor), `${url} must not advertise an unreadable neighbor`);
+  }
 });

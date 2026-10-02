@@ -5,7 +5,7 @@
 // Rules are hairlines in two weights: line-strong closes the masthead and underlines a page's heading
 // and the neighbours; line parts stories, columns and list rows. Nothing is set in solid ink. Stories
 // sit in rows of two whose rules run across the page, each story as tall as its neighbour.
-import { SITE } from "@aihot/industry/site";
+import { SITE, subjectAfter, withSubject } from "@aihot/industry/site";
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import type { ReportCitation, ReportDetail, ReportNavigationEntry } from "@aihot/contracts/site";
@@ -17,7 +17,7 @@ import { SourceAvatar } from "../../components/ui/SourceAvatar";
 import { Halftone } from "./Halftone";
 import { Nameplate } from "./Nameplate";
 import { IssueDots } from "./IssueDots";
-import { EDITION, KIND_LABEL, MOTTO, dateLine, dateMark, headline, issueNumber, metricItems, neighbourLabel, reportPath, shortDay } from "./format";
+import { EDITION, KIND_LABEL, MOTTO, dateLine, dateMark, headline, metricItems, neighbourLabel, reportPath, shortDay } from "./format";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const keyOf = (c: ReportCitation) => c.itemId ?? c.title;
@@ -25,7 +25,7 @@ const anchorOf = (c: ReportCitation) => (c.itemId ? `r-${c.itemId}` : null);
 const LINK = "inline-flex min-h-7 items-center gap-0.5 font-medium transition-colors hover:text-accent";
 
 function Masthead({ report, index }: { report: ReportDetail; index: ReportNavigationEntry[] }) {
-  const issue = issueNumber(index, report.key);
+  const issue = report.issueNumber;
   const mark = dateMark(report.kind, report.key);
   return (
     <header className="pt-5 lg:pt-0">
@@ -39,7 +39,7 @@ function Masthead({ report, index }: { report: ReportDetail; index: ReportNaviga
         <div className="flex min-w-0 flex-col justify-center">
           <h1 id="report-start">
             <span className="sr-only">
-              AI {KIND_LABEL[report.kind]} · {dateLine(report.kind, report.key)}
+              {withSubject(KIND_LABEL[report.kind])} · {dateLine(report.kind, report.key)}
             </span>
             <Nameplate which={report.kind} className="block h-[54px] w-auto @[520px]:h-[74px] @[880px]:h-[98px] @[1040px]:h-[112px]" />
           </h1>
@@ -56,7 +56,7 @@ function Masthead({ report, index }: { report: ReportDetail; index: ReportNaviga
             <span className="mt-2 text-[11.5px] text-ink-2">{mark.top}</span>
             <span className="text-[11.5px] text-ink-4">{mark.bottom}</span>
           </div>
-          <IssueDots kind={report.kind} reportKey={report.key} index={index} className="hidden w-[176px] border-l border-line px-4 py-4 @[760px]:block @[880px]:w-[196px]" />
+          <IssueDots kind={report.kind} reportKey={report.key} issueNumber={report.issueNumber} index={index} className="hidden w-[176px] border-l border-line px-4 py-4 @[760px]:block @[880px]:w-[196px]" />
         </div>
       </div>
 
@@ -308,7 +308,7 @@ export function SectionPage({ id, no, label, children }: { id: string; no?: numb
 const COLUMNS = "@[760px]:columns-2 @[760px]:gap-x-12 @[760px]:[column-rule:1px_solid_var(--line)]";
 
 function Neighbours({ report, index }: { report: ReportDetail; index: ReportNavigationEntry[] }) {
-  const titleOf = (key: string) => index.find((e) => e.key === key)?.title ?? `AI ${KIND_LABEL[report.kind]} · ${key}`;
+  const titleOf = (key: string) => index.find((e) => e.key === key)?.title ?? `${withSubject(KIND_LABEL[report.kind])} · ${key}`;
   const cell = "group flex min-w-0 flex-col py-6";
   const title = "mt-2.5 line-clamp-2 text-[16px] font-bold leading-[1.5] text-ink transition-colors group-hover:text-accent @[880px]:text-[18px]";
   return (
@@ -342,7 +342,7 @@ function History({ report, index }: { report: ReportDetail; index: ReportNavigat
   if (others.length === 0) return null;
   return (
     <section id="report-history" className="scroll-mt-6 pt-12">
-      <Kicker>往期 AI {KIND_LABEL[report.kind]}</Kicker>
+      <Kicker>{subjectAfter("往期", KIND_LABEL[report.kind])}</Kicker>
       <ul className="mt-3">
         {others.map((e) => (
           <li key={e.key}>
